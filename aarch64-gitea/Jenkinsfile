@@ -3,44 +3,37 @@
 node {
     def imageName = 'aarch64-gitea'
     def tagName = env.GITEA_TAG  ?: 'latest'
-    def branchName = env.GITEA_TAG  ? "v${GITEA_TAG}" : "master"
-    stage('checkout') {
-        git url: 'https://github.com/atzoum/docker-aarch64.git'
-    }
+    def branchName = env.GITEA_TAG  ? "v${GITEA_TAG}" : env.GITEA_BRANCH ?: "master"
     
-    withCredentials([[$class: 'UsernamePasswordMultiBinding', credentialsId: 'dockerhub', usernameVariable: 'DOCKER_USER', passwordVariable: 'DOCKER_PASS']]) {
-        withEnv(["PATH+DOCKER=/var/jenkins_home/docker-1.12.5","PATH+GIT=${ tool 'git'}","DOCKER_HOST=tcp://${DOCKER_HOSTNAME}:2375"]) {
+    docker.withTool('docker@1.12.5') {
+    docker.withServer("tcp://${DOCKER_HOSTNAME}:2375") {
+    docker.withRegistry('https://registry-1.docker.io', 'dockerhub') {
             
-            stage('build') {
-                
-                echo "building binary"
-                sh """
-                     git clean -df
-                     docker build -t ${DOCKER_USER}/aarch64-gitea-builder -f ${imageName}/Dockerfile.build ${imageName}/
-                     docker run -i --rm -v ${workspaceDir}/${imageName}/:/binary atzoum/aarch64-gitea-builder ${branchName}
-                """
-                dir(imageName) {
-                    stash name: "giteastash", includes: "README.md,Dockerfile"
-                    git(url: 'https://github.com/go-gitea/gitea.git', branch: 'master')
-                    if (env.GITEA_TAG) {
-                        sh "git checkout ${branchName}"
-                    }
-                    unstash "giteastash"
+        stage('checkout') {
+            git url: 'https://github.com/atzoum/docker-aarch64.git', branch: env.AARCH64_BRANCH ?: 'master'
+            sh 'git clean -dfx'
+        }
+        stage('build') {
+            dir(imageName) {
+                docker.build('gitea-build-env', '-f Dockerfile.build .').inside {
+                    sh "git clone -b $branchName --depth 1 --single-branch https://github.com/go-gitea/gitea.git gitea"
+                    sh 'mkdir -p ${GOPATH}/src/code.gitea.io/'
+                    sh 'ln -s gitea ${GOPATH}/src/code.gitea.io/'
+                    sh 'cd ${GOPATH}/src/code.gitea.io/gitea'
+                    sh 'TAGS="bindata sqlite pam" make generate build'
                 }
-                sh "docker build -t ${DOCKER_USER}/${imageName}:${tagName} ${imageName}/"
+                archiveArtifacts artifacts: 'gitea/gitea'
+                sh 'cp Dockerfile gitea/Dockerfile'    
+                sh "docker build -t atzoum/${imageName}:${tagName} gitea/"
             }
-
-            stage('push') {
-                
-                echo "pushing ${imageName}"
-                sh """
-                     docker login -u="$DOCKER_USER" -p="$DOCKER_PASS" && \
-                     docker push ${DOCKER_USER}/${imageName}:${tagName}
-                """
-            }
-
-            stage('update description') {
-                
+        }
+        stage('push') {
+            sh """
+            docker push atzoum/${imageName}:${tagName}
+            """
+        }
+        stage('update description') {
+            withCredentials([[$class: 'UsernamePasswordMultiBinding', credentialsId: 'dockerhub', usernameVariable: 'DOCKER_USER', passwordVariable: 'DOCKER_PASS']]) {
                 def fullDescription = readFile "${imageName}/README.md"
                 def token = readJson(
                     sh(
@@ -57,7 +50,7 @@ node {
                     consoleLogResponseBody: true)
             }
         }
-    }
+    }}}
 }
 
 @NonCPS
